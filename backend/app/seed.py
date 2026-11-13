@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, timezone
 
 from app.config import DATA_DIR
@@ -90,6 +91,26 @@ def init_db() -> None:
             "INSERT INTO datasets(name, fixture_path, entity_type, enabled, note) VALUES (?,?,?,?,?)",
             ("Inventory Snapshot", "inventory_snapshot.jsonl", "sku", 1, "库存快照第二路"),
         )
+        conn.execute(
+            "INSERT INTO datasets(name, fixture_path, entity_type, enabled, note) VALUES (?,?,?,?,?)",
+            (
+                "Inventory Pending (空夹具)",
+                "inventory_pending_empty.jsonl",
+                "sku",
+                1,
+                "演示用目标数据集：夹具为空，参照检查整批失败、不得签发",
+            ),
+        )
+        conn.execute(
+            "INSERT INTO datasets(name, fixture_path, entity_type, enabled, note) VALUES (?,?,?,?,?)",
+            (
+                "Inventory Pending (坏夹具)",
+                "inventory_pending_broken.jsonl",
+                "sku",
+                1,
+                "演示用目标数据集：夹具解析失败，参照检查整批失败、不得签发",
+            ),
+        )
         conn.executemany(
             "INSERT INTO rules(dataset_id, name, field, rule_type, severity, params_json, enabled) VALUES (?,?,?,?,?,?,?)",
             [
@@ -98,11 +119,81 @@ def init_db() -> None:
                 (1, "qty 须为整数", "qty", "type_int", "warn", "{}", 1),
                 (2, "sku 必填", "sku", "required", "error", "{}", 1),
                 (2, "on_hand 须为整数", "on_hand", "type_int", "error", "{}", 1),
+                # 跨数据集参照：Orders.sku 必须存在于 Inventory（目标夹具键集）的 sku 中
+                (
+                    1,
+                    "sku 须存在于库存夹具",
+                    "sku",
+                    "ref_exists",
+                    "error",
+                    json.dumps(
+                        {"target_dataset_id": 2, "target_field": "sku"},
+                        ensure_ascii=False,
+                    ),
+                    1,
+                ),
             ],
         )
         conn.execute(
             "INSERT INTO settings(key, value) VALUES (?, ?)",
             ("release_mode", "pass_only"),
         )
+    else:
+        _ensure_reference_seed(conn)
     conn.commit()
     conn.close()
+
+
+def _ensure_reference_seed(conn) -> None:
+    """已有库时补写参照检查所需的数据集与规则（幂等）。"""
+    pending_datasets = [
+        (
+            "Inventory Pending (空夹具)",
+            "inventory_pending_empty.jsonl",
+            "sku",
+            "演示用目标数据集：夹具为空，参照检查整批失败、不得签发",
+        ),
+        (
+            "Inventory Pending (坏夹具)",
+            "inventory_pending_broken.jsonl",
+            "sku",
+            "演示用目标数据集：夹具解析失败，参照检查整批失败、不得签发",
+        ),
+    ]
+    for name, fixture_path, entity_type, note in pending_datasets:
+        exists = conn.execute(
+            "SELECT id FROM datasets WHERE fixture_path=?", (fixture_path,)
+        ).fetchone()
+        if not exists:
+            conn.execute(
+                "INSERT INTO datasets(name, fixture_path, entity_type, enabled, note) VALUES (?,?,?,?,?)",
+                (name, fixture_path, entity_type, 1, note),
+            )
+
+    inventory = conn.execute(
+        "SELECT id FROM datasets WHERE fixture_path=?", ("inventory_snapshot.jsonl",)
+    ).fetchone()
+    orders = conn.execute(
+        "SELECT id FROM datasets WHERE fixture_path=?", ("orders_snapshot.jsonl",)
+    ).fetchone()
+    if not inventory or not orders:
+        return
+    existing_rule = conn.execute(
+        "SELECT id FROM rules WHERE dataset_id=? AND rule_type='ref_exists' AND field='sku'",
+        (orders["id"],),
+    ).fetchone()
+    if not existing_rule:
+        conn.execute(
+            "INSERT INTO rules(dataset_id, name, field, rule_type, severity, params_json, enabled) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (
+                orders["id"],
+                "sku 须存在于库存夹具",
+                "sku",
+                "ref_exists",
+                "error",
+                json.dumps({"target_dataset_id": inventory["id"], "target_field": "sku"}),
+                1,
+            ),
+        )
+

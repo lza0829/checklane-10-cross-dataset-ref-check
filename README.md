@@ -35,9 +35,43 @@ cd frontend && npm install && npm run dev
 ## 种子说明
 
 - **Orders Snapshot**：JSONL 商品快照，含必填缺失与类型错误行，用于演示入检与隔离。
-- **Inventory Snapshot**：库存快照，独立数据集，用于第二路规则演示。
+- **Inventory Snapshot**：库存快照，独立数据集，作为 Orders 的跨数据集参照目标。
+- **Inventory Pending (空夹具 / 坏夹具)**：演示目标未就绪时整批参照检查失败、不得假通过。
 
 打开「入检台」选数据集跑一次，再看隔离区 / 精选区 / 批次报告计数是否与本次报告一致。
+
+## 跨数据集参照检查
+
+模块：`backend/app/modules/cross_dataset_ref_check/`。
+
+规则类型 `ref_exists`，参数（`rules.params_json`）：
+
+```json
+{"target_dataset_id": 2, "target_field": "sku"}
+```
+
+语义与约束：
+
+1. **参照来源固定为目标数据集登记的夹具键集**（`fixture_path` → `target_field` 去空后的键集合），
+   每次入检实时解析；**不读取精选区**，未签发数据不得充当参照。
+2. 源行字段值不在目标键集中（含源字段为空）→ 该行按 error 隔离，**不得签发**。
+   命中详情与 `reference` 一并写入 `inspect_rows.rule_hits_json`，可定位失败键。
+3. 目标夹具**缺失 / 0 行 / 解析失败 / 键集为空 / 目标数据集不存在或停用** → 整批参照检查失败：
+   写入 `status=failed` 的空批次（scanned=passed=quarantined=released=0），不写行清单、
+   不写隔离、不签发；API 返回 **409** 并附失败批次报告。
+4. 入检报告 `report.reference` + `report.checks` 互相印证：
+   - 源侧行数 = 扫描行数；源键 = 命中 + 缺失；目标行 = 目标键 + 空键
+   - 缺参照行数 = 行清单缺参照行数 = 参照报告失败行数
+   - 缺参照行全部隔离、且与签发行无交集
+   - 失败键集合与行清单里记录的失败键一致
+5. 目标夹具增补键后**再次入检**即可，先前失败键转为通过（键集每次入检刷新，不缓存）。
+   本地要覆盖内置夹具时，把同名文件放到 `DATA_DIR/fixtures/`，解析优先取该覆盖层。
+
+演示（`Orders Snapshot` → `Inventory Snapshot`）：
+
+- `ORD-1` 的 `SKU-A` 在库存键集中 → 通过；`ORD-6` 的 `SKU-E` 不存在 → 隔离。
+- 把 Inventory 数据集的夹具改成 `inventory_pending_empty.jsonl`（空）或
+  `inventory_pending_broken.jsonl`（坏 JSONL）再入检 → 409，整批失败、零签发。
 
 ## 技术栈
 
@@ -45,4 +79,5 @@ Python 3.12 + FastAPI + SQLite；Vue 3 + Vite + Nginx。
 
 ## 0-1 切口（未实现，见题单）
 
-当前仓库已实现「单批入检 + 基础规则 + 放行签发」主链。严重度整批阻断、规则包版本、抽样入检、跨字段规则、批次重开、金标对照、批内重复键、放行冻结窗、规则临时豁免、跨数据集参照检查等均在 ackend/app/modules/* 留空包，按题单逐题换主链路实现。
+当前仓库已实现「单批入检 + 基础规则 + 放行签发」主链，并已实现**跨数据集参照检查**。
+其余切口（严重度整批阻断、规则包版本、抽样入检、跨字段规则、批次重开、金标对照、批内重复键、放行冻结窗、规则临时豁免）仍在 `backend/app/modules/*` 留空包，按题单逐题换主链路实现。
